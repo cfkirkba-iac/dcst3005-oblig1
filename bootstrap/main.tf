@@ -91,3 +91,14 @@ resource "azurerm_storage_container" "tfstate" {
     azurerm_role_assignment.blob_contributor_current_user
   ]
 }
+
+resource "azurerm_role_assignment" "pipeline_blob_contributor" {
+  scope                = azurerm_storage_account.sa.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = var.pipeline_principal_id
+  principal_type       = "ServicePrincipal"
+
+  depends_on = [
+    azurerm_storage_container.tfstate
+  ]
+}
