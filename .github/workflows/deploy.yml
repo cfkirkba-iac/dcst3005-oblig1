@@ -33,6 +33,8 @@ jobs:
     env:
       DEPLOY_ENV: ${{ github.event_name == 'push' && 'dev' || inputs.environment }}
 
+      TF_VAR_environment: ${{ github.event_name == 'push' && 'dev' || inputs.environment }}
+
       ARM_USE_OIDC: true
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
