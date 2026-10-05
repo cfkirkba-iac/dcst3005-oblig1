@@ -1,0 +1,148 @@
+name: Deploy Terraform
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        type: choice
+        options:
+          - dev
+          - prod
+        required: true
+        default: dev
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    environment: ${{ github.event_name == 'push' && 'dev' || inputs.environment }}
+
+    concurrency:
+      group: terraform-${{ github.event_name == 'push' && 'dev' || inputs.environment }}
+      cancel-in-progress: false
+
+    env:
+      DEPLOY_ENV: ${{ github.event_name == 'push' && 'dev' || inputs.environment }}
+
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      TF_INPUT: false
+      TF_IN_AUTOMATION: true
+
+      TF_VAR_short_name: cfkirkba
+      TF_VAR_location: norwayeast
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Login to Azure
+        uses: Azure/login@v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Show Azure identity
+        run: |
+          az account show \
+            --query "{Subscription:name,IdentityType:user.type,Identity:user.name}" \
+            --output table
+
+      - name: Set environment parameters
+        run: |
+          if [ "$DEPLOY_ENV" = "prod" ]; then
+            echo "TF_VAR_address_space=10.20.0.0/16" >> "$GITHUB_ENV"
+          else
+            echo "TF_VAR_address_space=10.10.0.0/16" >> "$GITHUB_ENV"
+          fi
+
+      - name: Init network
+        working-directory: stacks/network
+        run: |
+          terraform init \
+            -backend-config="${{ github.workspace }}/shared/backend.hcl" \
+            -backend-config="key=${DEPLOY_ENV}/network.tfstate"
+
+      - name: Validate network
+        working-directory: stacks/network
+        run: terraform validate
+
+      - name: Plan network
+        working-directory: stacks/network
+        run: terraform plan -no-color -out=tfplan
+
+      - name: Apply network
+        working-directory: stacks/network
+        run: terraform apply -no-color tfplan
+
+      - name: Prepare network remote state configuration
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+
+          path = os.path.join(
+              os.environ["GITHUB_WORKSPACE"],
+              "shared",
+              "backend.hcl"
+          )
+
+          config = {}
+
+          with open(path, encoding="utf-8") as file:
+              for line in file:
+                  line = line.strip()
+
+                  if not line or line.startswith("#"):
+                      continue
+
+                  key, value = [part.strip() for part in line.split("=", 1)]
+
+                  if value.lower() in ("true", "false"):
+                      config[key] = value.lower() == "true"
+                  else:
+                      config[key] = value.strip('"')
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(
+                  "TF_VAR_remote_state_config="
+                  + json.dumps(config, separators=(",", ":"))
+                  + "\n"
+              )
+          PY
+
+      - name: Init workload
+        working-directory: stacks/workload
+        run: |
+          terraform init \
+            -backend-config="${{ github.workspace }}/shared/backend.hcl" \
+            -backend-config="key=${DEPLOY_ENV}/workload.tfstate"
+
+      - name: Validate workload
+        working-directory: stacks/workload
+        run: terraform validate
+
+      - name: Plan workload
+        working-directory: stacks/workload
+        run: terraform plan -no-color -out=tfplan
+
+      - name: Apply workload
+        working-directory: stacks/workload
+        run: terraform apply -no-color tfplan
